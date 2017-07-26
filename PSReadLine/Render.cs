@@ -7,19 +7,19 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Management.Automation.Language;
+using System.Text;
 using Microsoft.PowerShell.Internal;
 
 namespace Microsoft.PowerShell
 {
     public partial class PSConsoleReadLine
     {
-        private CHAR_INFO[] _consoleBuffer;
+        private const int COMMON_WIDEST_CONSOLE_WIDTH = 160;
+        private readonly List<StringBuilder> _consoleBufferLines = new List<StringBuilder>(1) {new StringBuilder(COMMON_WIDEST_CONSOLE_WIDTH)};
         private int _initialX;
         private int _initialY;
-        private int _bufferWidth;
         private ConsoleColor _initialBackgroundColor;
         private ConsoleColor _initialForegroundColor;
-        private CHAR_INFO _space;
         private int _current;
         private int _emphasisStart;
         private int _emphasisLength;
@@ -80,12 +80,31 @@ namespace Microsoft.PowerShell
             var text = ParseInput();
 
             int statusLineCount = GetStatusLineCount();
-            int j = _initialX + (_bufferWidth * Options.ExtraPromptLineCount);
             var backgroundColor = _initialBackgroundColor;
             var foregroundColor = _initialForegroundColor;
+            string currentBackgroundColorSequnce = "";
+            string currentForegroundColorSequnce = "";
             bool afterLastToken = false;
-            int totalBytes = j;
             int bufferWidth = _console.BufferWidth;
+            int currentLogicalLine = 0;
+
+            void UpdateColorsIfNecessary(ConsoleColor foreground, ConsoleColor background)
+            {
+                var newForeground = MapColorToEscapeSequence(foreground, isBackground: false);
+                var newBackground = MapColorToEscapeSequence(background, isBackground: true);
+
+                if (!object.ReferenceEquals(newForeground, currentForegroundColorSequnce))
+                {
+                    _consoleBufferLines[currentLogicalLine].Append(newForeground);
+                    currentForegroundColorSequnce = newForeground;
+                }
+
+                if (!object.ReferenceEquals(newBackground, currentBackgroundColorSequnce))
+                {
+                    _consoleBufferLines[currentLogicalLine].Append(newBackground);
+                    currentBackgroundColorSequnce = newBackground;
+                }
+            }
 
             var tokenStack = new Stack<SavedTokenState>();
             tokenStack.Push(new SavedTokenState
@@ -102,27 +121,15 @@ namespace Microsoft.PowerShell
             {
                 _console.StartRender();
 
-                bufferLineCount = ConvertOffsetToCoordinates(text.Length).Y - _initialY + 1 + statusLineCount;
-                if (_consoleBuffer.Length != bufferLineCount * bufferWidth)
+                foreach (var buf in _consoleBufferLines)
                 {
-                    var newBuffer = new CHAR_INFO[bufferLineCount * bufferWidth];
-                    Array.Copy(_consoleBuffer, newBuffer, _initialX + (Options.ExtraPromptLineCount * _bufferWidth));
-                    if (_consoleBuffer.Length > bufferLineCount * bufferWidth)
-                    {
-                        int consoleBufferOffset = ConvertOffsetToConsoleBufferOffset(text.Length, _initialX + (Options.ExtraPromptLineCount * _bufferWidth));
-                        // Need to erase the extra lines that we won't draw again
-                        for (int i = consoleBufferOffset; i < _consoleBuffer.Length; i++)
-                        {
-                            _consoleBuffer[i] = _space;
-                        }
-                        _console.WriteBufferLines(_consoleBuffer, ref _initialY);
-                    }
-                    _consoleBuffer = newBuffer;
+                    buf.Clear();
                 }
+
+                bufferLineCount = ConvertOffsetToCoordinates(text.Length).Y - _initialY + 1 + statusLineCount;
 
                 for (int i = 0; i < text.Length; i++)
                 {
-                    totalBytes = totalBytes % bufferWidth;
                     if (!afterLastToken)
                     {
                         // Figure out the color of the character - if it's in a token,
@@ -192,55 +199,32 @@ namespace Microsoft.PowerShell
                     var charToRender = text[i];
                     if (charToRender == '\n')
                     {
-                        while ((j % bufferWidth) != 0)
+                        currentLogicalLine += 1;
+                        if (currentLogicalLine > _consoleBufferLines.Count - 1)
                         {
-                            _consoleBuffer[j++] = _space;
+                            _consoleBufferLines.Add(new StringBuilder(COMMON_WIDEST_CONSOLE_WIDTH));
                         }
 
-                        for (int k = 0; k < Options.ContinuationPrompt.Length; k++, j++)
+                        UpdateColorsIfNecessary(Options.ContinuationPromptForegroundColor, Options.CommandBackgroundColor);
+                        foreach (char c in Options.ContinuationPrompt)
                         {
-                            _consoleBuffer[j].UnicodeChar = Options.ContinuationPrompt[k];
-                            _consoleBuffer[j].ForegroundColor = Options.ContinuationPromptForegroundColor;
-                            _consoleBuffer[j].BackgroundColor = Options.ContinuationPromptBackgroundColor;
+                            _consoleBufferLines[currentLogicalLine].Append(c);
                         }
                     }
                     else
                     {
-                        int size = LengthInBufferCells(charToRender);
-                        totalBytes += size;
-
-                        //if there is no enough space for the character at the edge, fill in spaces at the end and 
-                        //put the character to next line.
-                        int filling = totalBytes > bufferWidth ? (totalBytes - bufferWidth) % size : 0;
-                        for (int f = 0; f < filling; f++)
-                        {
-                            _consoleBuffer[j++] = _space;
-                            totalBytes++;
-                        }
-
                         if (char.IsControl(charToRender))
                         {
-                            _consoleBuffer[j].UnicodeChar = '^';
-                            MaybeEmphasize(ref _consoleBuffer[j++], i, foregroundColor, backgroundColor);
-                            _consoleBuffer[j].UnicodeChar = (char)('@' + charToRender);
-                            MaybeEmphasize(ref _consoleBuffer[j++], i, foregroundColor, backgroundColor);
-
-                        }
-                        else if (size > 1)
-                        {
-                            _consoleBuffer[j].UnicodeChar = charToRender;
-                            _consoleBuffer[j].Attributes = (ushort)(_consoleBuffer[j].Attributes |
-                                                           (uint)CHAR_INFO_Attributes.COMMON_LVB_LEADING_BYTE);
-                            MaybeEmphasize(ref _consoleBuffer[j++], i, foregroundColor, backgroundColor);
-                            _consoleBuffer[j].UnicodeChar = charToRender;
-                            _consoleBuffer[j].Attributes = (ushort)(_consoleBuffer[j].Attributes |
-                                                           (uint)CHAR_INFO_Attributes.COMMON_LVB_TRAILING_BYTE);
-                            MaybeEmphasize(ref _consoleBuffer[j++], i, foregroundColor, backgroundColor);
+                            MaybeEmphasize(i, ref foregroundColor, ref backgroundColor);
+                            UpdateColorsIfNecessary(foregroundColor, backgroundColor);
+                            _consoleBufferLines[currentLogicalLine].Append('^');
+                            _consoleBufferLines[currentLogicalLine].Append((char)('@' + charToRender));
                         }
                         else
                         {
-                            _consoleBuffer[j].UnicodeChar = charToRender;
-                            MaybeEmphasize(ref _consoleBuffer[j++], i, foregroundColor, backgroundColor);
+                            MaybeEmphasize(i, ref foregroundColor, ref backgroundColor);
+                            UpdateColorsIfNecessary(foregroundColor, backgroundColor);
+                            _consoleBufferLines[currentLogicalLine].Append(charToRender);
                         }
                     }
                 }
@@ -250,63 +234,28 @@ namespace Microsoft.PowerShell
                 _console.EndRender();
             }
 
-            for (; j < (_consoleBuffer.Length - (statusLineCount * _bufferWidth)); j++)
-            {
-                _consoleBuffer[j] = _space;
-            }
-
             if (_statusLinePrompt != null)
             {
                 foregroundColor = _statusIsErrorMessage ? Options.ErrorForegroundColor : _console.ForegroundColor;
                 backgroundColor = _statusIsErrorMessage ? Options.ErrorBackgroundColor : _console.BackgroundColor;
+                UpdateColorsIfNecessary(foregroundColor, backgroundColor);
 
-                for (int i = 0; i < _statusLinePrompt.Length; i++, j++)
+                foreach (char c in _statusLinePrompt)
                 {
-                    _consoleBuffer[j].UnicodeChar = _statusLinePrompt[i];
-                    _consoleBuffer[j].ForegroundColor = foregroundColor;
-                    _consoleBuffer[j].BackgroundColor = backgroundColor;
+                    _consoleBufferLines[currentLogicalLine].Append(c);
                 }
-                for (int i = 0; i < _statusBuffer.Length; i++, j++)
-                {
-                    _consoleBuffer[j].UnicodeChar = _statusBuffer[i];
-                    _consoleBuffer[j].ForegroundColor = foregroundColor;
-                    _consoleBuffer[j].BackgroundColor = backgroundColor;
-                }
-
-                for (; j < _consoleBuffer.Length; j++)
-                {
-                    _consoleBuffer[j] = _space;
-                }
+                _consoleBufferLines[currentLogicalLine].Append(_statusBuffer);
             }
 
-            bool rendered = false;
-            if (_parseErrors.Length > 0)
+            var saveCurrent = _current;
+            _current = 0;
+            PlaceCursor();
+            foreach (var line in _consoleBufferLines)
             {
-                int promptChar = _initialX - 1 + (_bufferWidth * Options.ExtraPromptLineCount);
-
-                while (promptChar >= 0)
-                {
-                    var c = (char)_consoleBuffer[promptChar].UnicodeChar;
-                    if (char.IsWhiteSpace(c))
-                    {
-                        promptChar -= 1;
-                        continue;
-                    }
-
-                    ConsoleColor prevColor = _consoleBuffer[promptChar].ForegroundColor;
-                    _consoleBuffer[promptChar].ForegroundColor = ConsoleColor.Red;
-                    _console.WriteBufferLines(_consoleBuffer, ref _initialY);
-                    rendered = true;
-                    _consoleBuffer[promptChar].ForegroundColor = prevColor;
-                    break;
-                }
+                Console.WriteLine(line);
             }
 
-            if (!rendered)
-            {
-                _console.WriteBufferLines(_consoleBuffer, ref _initialY);
-            }
-
+            _current = saveCurrent;
             PlaceCursor();
 
             if ((_initialY + bufferLineCount) > (_console.WindowTop + _console.WindowHeight))
@@ -418,6 +367,49 @@ namespace Microsoft.PowerShell
             backgroundColor = _options.DefaultTokenBackgroundColor;
         }
 
+        private static readonly string[] BackgroundColorMap = {
+            "\x1b[40m", // Black
+            "\x1b[44m", // DarkBlue
+            "\x1b[42m", // DarkGreen
+            "\x1b[46m", // DarkCyan
+            "\x1b[41m", // DarkRed
+            "\x1b[45m", // DarkMagenta
+            "\x1b[43m", // DarkYellow
+            "\x1b[47m", // Gray
+            "\x1b[100m", // DarkGray
+            "\x1b[104m", // Blue
+            "\x1b[102m", // Green
+            "\x1b[106m", // Cyan
+            "\x1b[101m", // Red
+            "\x1b[105m", // Magenta
+            "\x1b[103m", // Yellow
+            "\x1b[107m", // White
+        };
+
+        private static readonly string[] ForegroundColorMap = {
+            "\x1b[30m", // Black
+            "\x1b[34m", // DarkBlue
+            "\x1b[32m", // DarkGreen
+            "\x1b[36m", // DarkCyan
+            "\x1b[31m", // DarkRed
+            "\x1b[35m", // DarkMagenta
+            "\x1b[33m", // DarkYellow
+            "\x1b[37m", // Gray
+            "\x1b[90m", // DarkGray
+            "\x1b[94m", // Blue
+            "\x1b[92m", // Green
+            "\x1b[96m", // Cyan
+            "\x1b[91m", // Red
+            "\x1b[95m", // Magenta
+            "\x1b[93m", // Yellow
+            "\x1b[97m", // White
+        };
+
+        private string MapColorToEscapeSequence(ConsoleColor color, bool isBackground)
+        {
+            return (isBackground ? BackgroundColorMap : ForegroundColorMap)[(int)color];
+        }
+
         private void GetRegion(out int start, out int length)
         {
             if (_mark < _current)
@@ -448,7 +440,7 @@ namespace Microsoft.PowerShell
             return i >= start && i < end;
         }
 
-        private void MaybeEmphasize(ref CHAR_INFO charInfo, int i, ConsoleColor foregroundColor, ConsoleColor backgroundColor)
+        private void MaybeEmphasize(int i, ref ConsoleColor foregroundColor, ref ConsoleColor backgroundColor)
         {
             if (i >= _emphasisStart && i < (_emphasisStart + _emphasisLength))
             {
@@ -465,9 +457,6 @@ namespace Microsoft.PowerShell
                 foregroundColor = (ConsoleColor)((int)foregroundColor ^ 7);
                 backgroundColor = (ConsoleColor)((int)backgroundColor ^ 7);
             }
-
-            charInfo.ForegroundColor = foregroundColor;
-            charInfo.BackgroundColor = backgroundColor;
         }
 
         private void PlaceCursor(int x, ref int y)
