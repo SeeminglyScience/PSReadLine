@@ -14,8 +14,15 @@ namespace Microsoft.PowerShell
 {
     public partial class PSConsoleReadLine
     {
+        struct RenderedLineData
+        {
+            public string line;
+            public int columns;
+        }
+
         private const int COMMON_WIDEST_CONSOLE_WIDTH = 160;
         private readonly List<StringBuilder> _consoleBufferLines = new List<StringBuilder>(1) {new StringBuilder(COMMON_WIDEST_CONSOLE_WIDTH)};
+        private RenderedLineData[] _previousRender = new RenderedLineData[0];
         private int _initialX;
         private int _initialY;
         private ConsoleColor _initialBackgroundColor;
@@ -241,13 +248,55 @@ namespace Microsoft.PowerShell
             var saveCurrent = _current;
             _current = 0;
             PlaceCursor();
-            foreach (var line in _consoleBufferLines)
+
+            var nextRender = new RenderedLineData[currentLogicalLine + 1];
+            for (var i = 0; i < currentLogicalLine + 1; i++)
             {
-                Console.WriteLine(line);
+                var line = _consoleBufferLines[i].ToString();
+                nextRender[i].line = line;
+                nextRender[i].columns = LengthInBufferCells(line);
             }
+
+            for (currentLogicalLine = 0; currentLogicalLine < nextRender.Length; currentLogicalLine++)
+            {
+                if (currentLogicalLine != 0)
+                    _console.Write("\n");
+
+                var line = nextRender[currentLogicalLine].line;
+
+                _console.Write(line);
+                if (currentLogicalLine < _previousRender.Length)
+                {
+                    var prevLen = _previousRender[currentLogicalLine].columns;
+                    var curLen = nextRender[currentLogicalLine].columns;
+                    if (prevLen > curLen)
+                    {
+                        _console.Write(new string(' ', prevLen - curLen));
+                    }
+                }
+            }
+
+            // Fewer lines than our last render? Clear them.
+            for (; currentLogicalLine < _previousRender.Length; currentLogicalLine++)
+            {
+                _console.Write("\n");
+                _console.Write(new string(' ', _previousRender[currentLogicalLine].columns));
+            }
+
+            var bufferCount = _consoleBufferLines.Count;
+            var excessBuffers = bufferCount - nextRender.Length;
+            if (excessBuffers > 5)
+            {
+                _consoleBufferLines.RemoveRange(nextRender.Length, excessBuffers);
+            }
+
+            _previousRender = nextRender;
 
             _current = saveCurrent;
             PlaceCursor();
+
+            // Reset the colors after we've finished all our rendering.
+            _console.Write("\x1b[0m");
 
             if ((_initialY + bufferLineCount) > (_console.WindowTop + _console.WindowHeight))
             {
@@ -257,7 +306,28 @@ namespace Microsoft.PowerShell
             _lastRenderTime.Restart();
         }
 
-        private int LengthInBufferCells(char c)
+        private int LengthInBufferCells(string str)
+        {
+            var sum = 0;
+            var len = str.Length;
+            for (var i = 0; i < len; i++)
+            {
+                var c = str[i];
+                if (c == 0x1b && (i+1) < len && str[i+1] == '[')
+                {
+                    // Simple escape sequence skipping
+                    i += 2;
+                    while (i < len && str[i] != 'm')
+                        i++;
+
+                    continue;
+                }
+                sum += LengthInBufferCells(c);
+            }
+            return sum;
+        }
+
+        private static int LengthInBufferCells(char c)
         {
             if (c < 256)
             {
