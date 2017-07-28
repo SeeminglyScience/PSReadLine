@@ -83,15 +83,6 @@ namespace Microsoft.PowerShell.Internal
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern IntPtr GetConsoleWindow();
 
-        [DllImport("User32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        public static extern IntPtr GetDC(IntPtr hwnd);
-
-        [DllImport("GDI32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        public static extern bool GetTextMetrics(IntPtr hdc, out TEXTMETRIC tm);
-
-        [DllImport("GDI32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        public static extern bool GetCharWidth32(IntPtr hdc, uint first, uint last, out int width);
-
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern IntPtr CreateFile
         (
@@ -103,9 +94,6 @@ namespace Microsoft.PowerShell.Internal
             uint flagsAndAttributes,
             IntPtr templateFileWin32Handle
         );
-
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        internal static extern bool GetCurrentConsoleFontEx(IntPtr consoleOutput, bool bMaximumWindow, ref CONSOLE_FONT_INFO_EX consoleFontInfo);
 
         [StructLayout(LayoutKind.Sequential)]
         internal struct COLORREF
@@ -247,60 +235,6 @@ namespace Microsoft.PowerShell.Internal
         }
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct FONTSIGNATURE
-    {
-        //From public\sdk\inc\wingdi.h
-
-        // fsUsb*: A 128-bit Unicode subset bitfield (USB) identifying up to 126 Unicode subranges
-        internal uint fsUsb0;
-        internal uint fsUsb1;
-        internal uint fsUsb2;
-        internal uint fsUsb3;
-        // fsCsb*: A 64-bit, code-page bitfield (CPB) that identifies a specific character set or code page.
-        internal uint fsCsb0;
-        internal uint fsCsb1;
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    internal struct TEXTMETRIC
-    {
-        //From public\sdk\inc\wingdi.h
-        public int tmHeight;
-        public int tmAscent;
-        public int tmDescent;
-        public int tmInternalLeading;
-        public int tmExternalLeading;
-        public int tmAveCharWidth;
-        public int tmMaxCharWidth;
-        public int tmWeight;
-        public int tmOverhang;
-        public int tmDigitizedAspectX;
-        public int tmDigitizedAspectY;
-        public char tmFirstChar;
-        public char tmLastChar;
-        public char tmDefaultChar;
-        public char tmBreakChar;
-        public byte tmItalic;
-        public byte tmUnderlined;
-        public byte tmStruckOut;
-        public byte tmPitchAndFamily;
-        public byte tmCharSet;
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    internal struct CONSOLE_FONT_INFO_EX
-    {
-        internal int cbSize;
-        internal int nFont;
-        internal short FontWidth;
-        internal short FontHeight;
-        internal int FontFamily;
-        internal int FontWeight;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
-        internal string FontFace;
-    }
-
     public struct CHAR_INFO
     {
         public ushort UnicodeChar;
@@ -402,15 +336,6 @@ namespace Microsoft.PowerShell.Internal
 
     internal class ConhostConsole : IConsole
     {
-        [SuppressMessage("Microsoft.Reliability", "CA2006:UseSafeHandleToEncapsulateNativeResources")]
-        private IntPtr _hwnd = (IntPtr)0;
-        [SuppressMessage("Microsoft.Reliability", "CA2006:UseSafeHandleToEncapsulateNativeResources")]
-        private IntPtr _hDC = (IntPtr)0;
-        private uint _codePage;
-        private bool _istmInitialized = false;
-        private TEXTMETRIC _tm = new TEXTMETRIC();
-        private bool _trueTypeInUse = false;
-
         private readonly Lazy<SafeFileHandle> _outputHandle = new Lazy<SafeFileHandle>(() =>
         {
             // We use CreateFile here instead of GetStdWin32Handle, as GetStdWin32Handle will return redirected handles
@@ -637,179 +562,6 @@ namespace Microsoft.PowerShell.Internal
             NativeMethods.ReadConsoleOutput(handle, result,
                 readBufferSize, readBufferCoord, ref readRegion);
             return result;
-        }
-
-        [SuppressMessage("Microsoft.Reliability", "CA2001:AvoidCallingProblematicMethods",
-            Justification = "Then the API we pass the handle to will return an error if it is invalid. They are not exposed.")]
-        internal static CONSOLE_FONT_INFO_EX GetConsoleFontInfo(SafeFileHandle consoleHandle)
-        {
-
-            CONSOLE_FONT_INFO_EX fontInfo = new CONSOLE_FONT_INFO_EX();
-            fontInfo.cbSize = Marshal.SizeOf(fontInfo);
-            bool result = NativeMethods.GetCurrentConsoleFontEx(consoleHandle.DangerousGetHandle(), false, ref fontInfo);
-
-            if (result == false)
-            {
-                int err = Marshal.GetLastWin32Error();
-                Win32Exception innerException = new Win32Exception(err);
-                throw new Exception("Failed to get console font information.", innerException);
-            }
-            return fontInfo;
-        }
-
-        public int LengthInBufferCells(char c)
-        {
-            if (!IsCJKOutputCodePage() || !_trueTypeInUse)
-                return 1;
-
-            return LengthInBufferCellsFE(c);
-        }
-
-        /// <summary>
-        /// Check if the output buffer code page is Japanese, Simplified Chinese, Korean, or Traditional Chinese
-        /// </summary>
-        /// <returns>true if it is CJK code page; otherwise, false.</returns>
-        internal bool IsCJKOutputCodePage()
-        {
-            return _codePage == 932 || // Japanese
-                   _codePage == 936 || // Simplified Chinese
-                   _codePage == 949 || // Korean
-                   _codePage == 950;  // Traditional Chinese
-        }
-
-        internal int LengthInBufferCellsFE(char c)
-        {
-            if (0x20 <= c && c <= 0x7e)
-            {
-                /* ASCII */
-                return 1;
-            }
-            else if (0x3041 <= c && c <= 0x3094)
-            {
-                /* Hiragana */
-                return 2;
-            }
-            else if (0x30a1 <= c && c <= 0x30f6)
-            {
-                /* Katakana */
-                return 2;
-            }
-            else if (0x3105 <= c && c <= 0x312c)
-            {
-                /* Bopomofo */
-                return 2;
-            }
-            else if (0x3131 <= c && c <= 0x318e)
-            {
-                /* Hangul Elements */
-                return 2;
-            }
-            else if (0xac00 <= c && c <= 0xd7a3)
-            {
-                /* Korean Hangul Syllables */
-                return 2;
-            }
-            else if (0xff01 <= c && c <= 0xff5e)
-            {
-                /* Fullwidth ASCII variants */
-                return 2;
-            }
-            else if (0xff61 <= c && c <= 0xff9f)
-            {
-                /* Halfwidth Katakana variants */
-                return 1;
-            }
-            else if ((0xffa0 <= c && c <= 0xffbe) ||
-                     (0xffc2 <= c && c <= 0xffc7) ||
-                     (0xffca <= c && c <= 0xffcf) ||
-                     (0xffd2 <= c && c <= 0xffd7) ||
-                     (0xffda <= c && c <= 0xffdc))
-            {
-                /* Halfwidth Hangule variants */
-                return 1;
-            }
-            else if (0xffe0 <= c && c <= 0xffe6)
-            {
-                /* Fullwidth symbol variants */
-                return 2;
-            }
-            else if (0x4e00 <= c && c <= 0x9fa5)
-            {
-                /* Han Ideographic */
-                return 2;
-            }
-            else if (0xf900 <= c && c <= 0xfa2d)
-            {
-                /* Han Compatibility Ideographs */
-                return 2;
-            }
-            else
-            {
-                /* Unknown character: need to use GDI*/
-                if (_hDC == (IntPtr)0)
-                {
-                    _hwnd = NativeMethods.GetConsoleWindow();
-                    if ((IntPtr)0 == _hwnd)
-                    {
-                        return 1;
-                    }
-                    _hDC = NativeMethods.GetDC(_hwnd);
-                    if ((IntPtr)0 == _hDC)
-                    {
-                        //Don't throw exception so that output can continue
-                        return 1;
-                    }
-                }
-                bool result = true;
-                if (!_istmInitialized)
-                {
-                    result = NativeMethods.GetTextMetrics(_hDC, out _tm);
-                    if (!result)
-                    {
-                        return 1;
-                    }
-                    _istmInitialized = true;
-                }
-                int width;
-                result = NativeMethods.GetCharWidth32(_hDC, (uint)c, (uint)c, out width);
-                if (!result)
-                {
-                    return 1;
-                }
-                if (width >= _tm.tmMaxCharWidth)
-                {
-                    return 2;
-                }
-            }
-            return 1;
-        }
-
-        public void StartRender()
-        {
-            _codePage = NativeMethods.GetConsoleOutputCP();
-            _istmInitialized = false;
-            var consoleHandle = _outputHandle.Value;
-            try
-            {
-                CONSOLE_FONT_INFO_EX fontInfo = ConhostConsole.GetConsoleFontInfo(consoleHandle);
-                int fontType = fontInfo.FontFamily & NativeMethods.FontTypeMask;
-                _trueTypeInUse = (fontType & NativeMethods.TrueTypeFont) == NativeMethods.TrueTypeFont;
-            }
-            catch (Exception)
-            {
-                // Ignore failures to get font information. In Windows Server containers,
-                // the font information cannot be queried.
-            }
-        }
-
-        [SuppressMessage("Microsoft.Usage", "CA1806:DoNotIgnoreMethodResults",
-            MessageId = "Microsoft.PowerShell.Internal.NativeMethods.ReleaseDC(System.IntPtr,System.IntPtr)")]
-        public void EndRender()
-        {
-            if (_hwnd != (IntPtr)0 && _hDC != (IntPtr)0)
-            {
-                NativeMethods.ReleaseDC(_hwnd, _hDC);
-            }
         }
 
         public bool IsHandleRedirected(bool stdIn)

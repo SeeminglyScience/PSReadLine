@@ -117,121 +117,112 @@ namespace Microsoft.PowerShell
 
             int bufferLineCount;
 
-            try
+            foreach (var buf in _consoleBufferLines)
             {
-                _console.StartRender();
+                buf.Clear();
+            }
 
-                foreach (var buf in _consoleBufferLines)
+            bufferLineCount = ConvertOffsetToCoordinates(text.Length).Y - _initialY + 1 + statusLineCount;
+
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (!afterLastToken)
                 {
-                    buf.Clear();
-                }
-
-                bufferLineCount = ConvertOffsetToCoordinates(text.Length).Y - _initialY + 1 + statusLineCount;
-
-                for (int i = 0; i < text.Length; i++)
-                {
-                    if (!afterLastToken)
+                    // Figure out the color of the character - if it's in a token,
+                    // use the tokens color otherwise use the initial color.
+                    var state = tokenStack.Peek();
+                    var token = state.Tokens[state.Index];
+                    if (i == token.Extent.EndOffset)
                     {
-                        // Figure out the color of the character - if it's in a token,
-                        // use the tokens color otherwise use the initial color.
-                        var state = tokenStack.Peek();
-                        var token = state.Tokens[state.Index];
-                        if (i == token.Extent.EndOffset)
+                        if (token == state.Tokens[state.Tokens.Length - 1])
                         {
-                            if (token == state.Tokens[state.Tokens.Length - 1])
+                            tokenStack.Pop();
+                            if (tokenStack.Count == 0)
                             {
-                                tokenStack.Pop();
-                                if (tokenStack.Count == 0)
-                                {
-                                    afterLastToken = true;
-                                    token = null;
-                                    foregroundColor = _initialForegroundColor;
-                                    backgroundColor = _initialBackgroundColor;
-                                }
-                                else
-                                {
-                                    state = tokenStack.Peek();
-                                }
+                                afterLastToken = true;
+                                token = null;
+                                foregroundColor = _initialForegroundColor;
+                                backgroundColor = _initialBackgroundColor;
                             }
-
-                            if (!afterLastToken)
+                            else
                             {
-                                foregroundColor = state.ForegroundColor;
-                                backgroundColor = state.BackgroundColor;
-
-                                token = state.Tokens[++state.Index];
+                                state = tokenStack.Peek();
                             }
                         }
 
-                        if (!afterLastToken && i == token.Extent.StartOffset)
+                        if (!afterLastToken)
                         {
-                            GetTokenColors(token, out foregroundColor, out backgroundColor);
+                            foregroundColor = state.ForegroundColor;
+                            backgroundColor = state.BackgroundColor;
 
-                            var stringToken = token as StringExpandableToken;
-                            if (stringToken != null)
+                            token = state.Tokens[++state.Index];
+                        }
+                    }
+
+                    if (!afterLastToken && i == token.Extent.StartOffset)
+                    {
+                        GetTokenColors(token, out foregroundColor, out backgroundColor);
+
+                        var stringToken = token as StringExpandableToken;
+                        if (stringToken != null)
+                        {
+                            // We might have nested tokens.
+                            if (stringToken.NestedTokens != null && stringToken.NestedTokens.Any())
                             {
-                                // We might have nested tokens.
-                                if (stringToken.NestedTokens != null && stringToken.NestedTokens.Any())
+                                var tokens = new Token[stringToken.NestedTokens.Count + 1];
+                                stringToken.NestedTokens.CopyTo(tokens, 0);
+                                // NestedTokens doesn't have an "EOS" token, so we use
+                                // the string literal token for that purpose.
+                                tokens[tokens.Length - 1] = stringToken;
+
+                                tokenStack.Push(new SavedTokenState
                                 {
-                                    var tokens = new Token[stringToken.NestedTokens.Count + 1];
-                                    stringToken.NestedTokens.CopyTo(tokens, 0);
-                                    // NestedTokens doesn't have an "EOS" token, so we use
-                                    // the string literal token for that purpose.
-                                    tokens[tokens.Length - 1] = stringToken;
+                                    Tokens = tokens,
+                                    Index = 0,
+                                    BackgroundColor = backgroundColor,
+                                    ForegroundColor = foregroundColor
+                                });
 
-                                    tokenStack.Push(new SavedTokenState
-                                    {
-                                        Tokens = tokens,
-                                        Index = 0,
-                                        BackgroundColor = backgroundColor,
-                                        ForegroundColor = foregroundColor
-                                    });
-
-                                    if (i == tokens[0].Extent.StartOffset)
-                                    {
-                                        GetTokenColors(tokens[0], out foregroundColor, out backgroundColor);
-                                    }
+                                if (i == tokens[0].Extent.StartOffset)
+                                {
+                                    GetTokenColors(tokens[0], out foregroundColor, out backgroundColor);
                                 }
                             }
                         }
                     }
+                }
 
-                    var charToRender = text[i];
-                    if (charToRender == '\n')
+                var charToRender = text[i];
+                if (charToRender == '\n')
+                {
+                    currentLogicalLine += 1;
+                    if (currentLogicalLine > _consoleBufferLines.Count - 1)
                     {
-                        currentLogicalLine += 1;
-                        if (currentLogicalLine > _consoleBufferLines.Count - 1)
-                        {
-                            _consoleBufferLines.Add(new StringBuilder(COMMON_WIDEST_CONSOLE_WIDTH));
-                        }
+                        _consoleBufferLines.Add(new StringBuilder(COMMON_WIDEST_CONSOLE_WIDTH));
+                    }
 
-                        UpdateColorsIfNecessary(Options.ContinuationPromptForegroundColor, Options.CommandBackgroundColor);
-                        foreach (char c in Options.ContinuationPrompt)
-                        {
-                            _consoleBufferLines[currentLogicalLine].Append(c);
-                        }
+                    UpdateColorsIfNecessary(Options.ContinuationPromptForegroundColor, Options.CommandBackgroundColor);
+                    foreach (char c in Options.ContinuationPrompt)
+                    {
+                        _consoleBufferLines[currentLogicalLine].Append(c);
+                    }
+                }
+                else
+                {
+                    if (char.IsControl(charToRender))
+                    {
+                        MaybeEmphasize(i, ref foregroundColor, ref backgroundColor);
+                        UpdateColorsIfNecessary(foregroundColor, backgroundColor);
+                        _consoleBufferLines[currentLogicalLine].Append('^');
+                        _consoleBufferLines[currentLogicalLine].Append((char)('@' + charToRender));
                     }
                     else
                     {
-                        if (char.IsControl(charToRender))
-                        {
-                            MaybeEmphasize(i, ref foregroundColor, ref backgroundColor);
-                            UpdateColorsIfNecessary(foregroundColor, backgroundColor);
-                            _consoleBufferLines[currentLogicalLine].Append('^');
-                            _consoleBufferLines[currentLogicalLine].Append((char)('@' + charToRender));
-                        }
-                        else
-                        {
-                            MaybeEmphasize(i, ref foregroundColor, ref backgroundColor);
-                            UpdateColorsIfNecessary(foregroundColor, backgroundColor);
-                            _consoleBufferLines[currentLogicalLine].Append(charToRender);
-                        }
+                        MaybeEmphasize(i, ref foregroundColor, ref backgroundColor);
+                        UpdateColorsIfNecessary(foregroundColor, backgroundColor);
+                        _consoleBufferLines[currentLogicalLine].Append(charToRender);
                     }
                 }
-            }
-            finally
-            {
-                _console.EndRender();
             }
 
             if (_statusLinePrompt != null)
@@ -268,12 +259,31 @@ namespace Microsoft.PowerShell
 
         private int LengthInBufferCells(char c)
         {
-            int length = Char.IsControl(c) ? 1 : 0;
             if (c < 256)
             {
-                return length + 1;
+                // We render ^C for Ctrl+C, so return 2 for control characters
+                return Char.IsControl(c) ? 2 : 1;
             }
-            return _console.LengthInBufferCells(c);
+
+            // The following is based on http://www.cl.cam.ac.uk/~mgk25/c/wcwidth.c
+            // which is derived from http://www.unicode.org/Public/UCD/latest/ucd/EastAsianWidth.txt
+
+            bool isWide = c >= 0x1100 &&
+                (c <= 0x115f || /* Hangul Jamo init. consonants */
+                 c == 0x2329 || c == 0x232a ||
+                 (c >= 0x2e80 && c <= 0xa4cf &&
+                  c != 0x303f) || /* CJK ... Yi */
+                 (c >= 0xac00 && c <= 0xd7a3) || /* Hangul Syllables */
+                 (c >= 0xf900 && c <= 0xfaff) || /* CJK Compatibility Ideographs */
+                 (c >= 0xfe10 && c <= 0xfe19) || /* Vertical forms */
+                 (c >= 0xfe30 && c <= 0xfe6f) || /* CJK Compatibility Forms */
+                 (c >= 0xff00 && c <= 0xff60) || /* Fullwidth Forms */
+                 (c >= 0xffe0 && c <= 0xffe6));
+                  // We can ignore these ranges because .Net strings use surrogate pairs
+                  // for this range and we do not handle surrogage pairs.
+                  // (c >= 0x20000 && c <= 0x2fffd) ||
+                  // (c >= 0x30000 && c <= 0x3fffd)
+            return 1 + (isWide ? 1 : 0);
         }
 
         private static void WriteBlankLines(int count, int top)
