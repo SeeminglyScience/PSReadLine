@@ -41,6 +41,7 @@ namespace Microsoft.PowerShell
         private Thread _readKeyThread;
         private AutoResetEvent _readKeyWaitHandle;
         private AutoResetEvent _keyReadWaitHandle;
+        private WaitHandle _cancelReadWaitHandle;
         internal ManualResetEvent _closingWaitHandle;
         private WaitHandle[] _threadProcWaitHandles;
         private WaitHandle[] _requestKeyWaitHandles;
@@ -139,7 +140,12 @@ namespace Microsoft.PowerShell
                 if (handleId == 1) // It was the _closingWaitHandle that was signaled.
                     break;
 
+                var localCanceledHandle = _singleton._cancelReadWaitHandle;
                 ReadOneOrMoreKeys();
+                if (localCanceledHandle.WaitOne(0))
+                {
+                    continue;
+                }
 
                 // One or more keys were read - let ReadKey know we're done.
                 _keyReadWaitHandle.Set();
@@ -249,6 +255,14 @@ namespace Microsoft.PowerShell
                 throw new OperationCanceledException();
             }
 
+            if (handleId == 2)
+            {
+                _singleton._inputAccepted = true;
+                _singleton._readKeyWaitHandle.Reset();
+                _singleton._keyReadWaitHandle.Reset();
+                return default(ConsoleKeyInfo);
+            }
+
             var key = _singleton._queuedKeys.Dequeue();
             return key;
         }
@@ -276,6 +290,16 @@ namespace Microsoft.PowerShell
         /// <returns>The complete command line.</returns>
         public static string ReadLine(Runspace runspace, EngineIntrinsics engineIntrinsics)
         {
+            return ReadLine(runspace, engineIntrinsics, new CancellationTokenSource().Token);
+        }
+
+        /// <summary>
+        /// Entry point - called from the PowerShell function PSConsoleHostReadLine
+        /// after the prompt has been displayed.
+        /// </summary>
+        /// <returns>The complete command line.</returns>
+        public static string ReadLine(Runspace runspace, EngineIntrinsics engineIntrinsics, CancellationToken cancellationToken)
+        {
             var console = _singleton._console;
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -294,6 +318,8 @@ namespace Microsoft.PowerShell
                         _singleton.Initialize(runspace, engineIntrinsics);
                     }
 
+                    _singleton._cancelReadWaitHandle = cancellationToken.WaitHandle;
+                    _singleton._requestKeyWaitHandles[2] = _singleton._cancelReadWaitHandle;
                     return _singleton.InputLoop();
                 }
                 catch (OperationCanceledException)
@@ -685,7 +711,7 @@ namespace Microsoft.PowerShell
             _singleton._readKeyWaitHandle = new AutoResetEvent(false);
             _singleton._keyReadWaitHandle = new AutoResetEvent(false);
             _singleton._closingWaitHandle = new ManualResetEvent(false);
-            _singleton._requestKeyWaitHandles = new WaitHandle[] {_singleton._keyReadWaitHandle, _singleton._closingWaitHandle};
+            _singleton._requestKeyWaitHandles = new WaitHandle[3] {_singleton._keyReadWaitHandle, _singleton._closingWaitHandle, CancellationToken.None.WaitHandle};
             _singleton._threadProcWaitHandles = new WaitHandle[] {_singleton._readKeyWaitHandle, _singleton._closingWaitHandle};
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
